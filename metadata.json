@@ -1,0 +1,6 @@
+{
+  "name": "Email Threat & Forensic Intelligence Platform",
+  "description": "AI-Powered Email Threat Detection, Geolocation, Relay Forensics and Graph Intelligence Platform (SIH - Cannon Crew).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
