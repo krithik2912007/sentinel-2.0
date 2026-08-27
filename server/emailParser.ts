@@ -2,20 +2,32 @@ import crypto from 'crypto';
 import { AttachmentMetadata } from '../src/types';
 
 export interface ParsedRawEmail {
+  id: string;
+  evidence_hash: string;
   evidence_hash_sha256: string;
   sha1_hash: string;
   md5_hash: string;
+  ingested_at: string;
   headers: Record<string, string>;
+  raw_headers: Record<string, string>;
   received_headers: string[];
   subject: string;
   from: string;
   from_name: string;
   from_email: string;
+  sender: { raw: string; email: string; name: string };
+  sender_raw: string;
+  sender_email: string;
+  sender_name: string;
   to: string;
   to_email: string;
+  recipient: { raw: string; email: string };
+  recipient_raw: string;
+  recipient_email: string;
   reply_to?: string;
   return_path?: string;
   date?: string;
+  date_header?: string;
   message_id?: string;
   body_plain: string;
   body_html?: string;
@@ -23,6 +35,7 @@ export interface ParsedRawEmail {
   extracted_urls: string[];
   extracted_ips: string[];
   extracted_domains: string[];
+  raw_eml_source?: string;
 }
 
 function decodeQuotedPrintable(str: string): string {
@@ -229,21 +242,43 @@ export function parseEmailContent(rawEml: string): ParsedRawEmail {
     }
   }
 
+  const emailId = `eml_${evidence_hash_sha256.slice(0, 16)}`;
+  const nowIso = new Date().toISOString();
+
   return {
+    id: emailId,
+    evidence_hash: evidence_hash_sha256,
     evidence_hash_sha256,
     sha1_hash,
     md5_hash,
+    ingested_at: nowIso,
     headers,
+    raw_headers: headers,
     received_headers,
-    subject,
+    subject: subject || '(No Subject)',
     from: rawFrom,
     from_name: from_name || 'Sender',
     from_email,
+    sender: {
+      raw: rawFrom,
+      email: from_email,
+      name: from_name || 'Sender',
+    },
+    sender_raw: rawFrom,
+    sender_email: from_email,
+    sender_name: from_name || 'Sender',
     to: rawTo,
     to_email,
+    recipient: {
+      raw: rawTo,
+      email: to_email,
+    },
+    recipient_raw: rawTo,
+    recipient_email: to_email,
     reply_to,
     return_path,
     date,
+    date_header: date || nowIso,
     message_id,
     body_plain: body_plain.trim(),
     body_html,
@@ -251,5 +286,9 @@ export function parseEmailContent(rawEml: string): ParsedRawEmail {
     extracted_urls,
     extracted_ips,
     extracted_domains: Array.from(extracted_domains),
+    raw_eml_source: rawEml,
   };
 }
+
+export const parseRawEmail = parseEmailContent;
+

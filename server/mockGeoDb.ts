@@ -1,7 +1,7 @@
 import { GeoLocationInfo } from '../src/types';
 
-// Robust offline & realistic IP Geolocation & ASN intelligence dictionary
-const KNOWN_IP_RANGES: Record<string, GeoLocationInfo> = {
+export const KNOWN_IP_RANGES: Record<string, GeoLocationInfo> = {
+
   // Suspect Attack Nodes / VPN / Tor
   '185.220.101.5': {
     ip: '185.220.101.5',
@@ -300,3 +300,7 @@ export function lookupIpIntelligence(ip: string): GeoLocationInfo {
     threat_reputation: hash % 5 === 0 ? 'SUSPICIOUS' : 'CLEAN',
   };
 }
+
+export const MOCK_IP_GEO_DB = KNOWN_IP_RANGES;
+export const generateDeterministicGeoFallback = lookupIpIntelligence;
+

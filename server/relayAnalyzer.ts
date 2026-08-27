@@ -3,6 +3,7 @@ import { isPrivateIp, lookupIpIntelligence } from './mockGeoDb';
 
 export interface RelayAnalysisResult {
   hops: RelayHop[];
+  relay_hops: RelayHop[];
   origin_candidates: OriginCandidate[];
   total_transit_seconds: number;
   anomalies_detected: string[];
@@ -12,6 +13,7 @@ export function reconstructRelayChain(receivedHeaders: string[]): RelayAnalysisR
   if (!receivedHeaders || receivedHeaders.length === 0) {
     return {
       hops: [],
+      relay_hops: [],
       origin_candidates: [],
       total_transit_seconds: 0,
       anomalies_detected: ['No Received headers found in message. Possible forged or direct injection.'],
@@ -172,8 +174,17 @@ export function reconstructRelayChain(receivedHeaders: string[]): RelayAnalysisR
 
   return {
     hops,
+    relay_hops: hops,
     origin_candidates: originCandidates,
     total_transit_seconds: totalTransit,
     anomalies_detected: anomalies,
   };
 }
+
+export function analyzeRelayHops(input: string[] | { received_headers?: string[] }): RelayAnalysisResult {
+  if (Array.isArray(input)) {
+    return reconstructRelayChain(input);
+  }
+  return reconstructRelayChain(input?.received_headers || []);
+}
+

@@ -206,7 +206,7 @@ export interface CorrelationGraphData {
 
 export interface AnalyzedEmail {
   id: string;
-  case_id: string;
+  case_id?: string;
   evidence_hash: string; // SHA-256 of raw email
   sha1_hash: string;
   md5_hash: string;
@@ -214,9 +214,11 @@ export interface AnalyzedEmail {
   
   // Headers
   subject: string;
+  sender?: { raw: string; email: string; name: string };
   sender_raw: string;
   sender_email: string;
   sender_name: string;
+  recipient?: { raw: string; email: string };
   recipient_raw: string;
   recipient_email: string;
   reply_to?: string;
@@ -268,10 +270,32 @@ export interface AuditEvent {
   user_email: string;
   user_role: UserRole;
   action: string;
-  target_type: 'CASE' | 'EMAIL' | 'REPORT' | 'CONFIG' | 'AUTH';
+  target_type: 'CASE' | 'EMAIL' | 'REPORT' | 'CONFIG' | 'AUTH' | 'USER' | 'DATABASE' | 'DOMAIN_OR_SENDER';
   target_id: string;
   details: string;
   ip_address: string;
+}
+
+export interface RemediationProvider {
+  key: 'm365' | 'google' | 'simulation';
+  name: string;
+  configured: boolean;
+  status: 'LIVE' | 'NOT_CONFIGURED' | 'SIMULATED';
+  description: string;
+  supported_actions: string[];
+}
+
+export type ResponseActionStatus = 'SUCCESS' | 'SIMULATED' | 'NOT_CONFIGURED' | 'ERROR';
+
+export interface ResponseResult {
+  status: ResponseActionStatus;
+  provider: string;
+  provider_key?: 'm365' | 'google' | 'simulation';
+  action: 'QUARANTINE' | 'BLOCK_SENDER' | 'PURGE';
+  target_id: string;
+  message: string;
+  external_id?: string;
+  timestamp: string;
 }
 
 export interface IntelligenceProviderConfig {

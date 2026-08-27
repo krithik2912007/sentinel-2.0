@@ -224,3 +224,24 @@ export function buildCorrelationGraph(
     related_cases_count: campaignName ? 4 : 1,
   };
 }
+
+export function generateCorrelationGraph(
+  parsed: ParsedRawEmail,
+  originCandidates: any[],
+  indicators: any[],
+  caseId?: string
+): CorrelationGraphData {
+  const emailId = parsed.id || `eml_${parsed.evidence_hash_sha256?.slice(0, 16) || 'root'}`;
+  const threatStub: any = {
+    risk_score: 75,
+    classification: 'PHISHING',
+    indicators,
+  };
+  const relayStub: any = {
+    origin_candidates: originCandidates,
+    hops: [],
+  };
+
+  return buildCorrelationGraph(emailId, parsed, relayStub, threatStub, caseId);
+}
+

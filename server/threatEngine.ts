@@ -10,6 +10,7 @@ import {
 import { ParsedRawEmail } from './emailParser';
 import { RelayAnalysisResult } from './relayAnalyzer';
 import { lookupIpIntelligence } from './mockGeoDb';
+import { intelligenceManager } from './intelligence/providerManager';
 
 // Common impersonated brands and domains for typo-squatting detection
 const TARGET_BRANDS = [
@@ -50,16 +51,92 @@ function levenshteinDistance(a: string, b: string): number {
   return matrix[b.length][a.length];
 }
 
-function checkLookalikeDomain(domain: string): { isLookalike: boolean; brand?: string; similarityScore?: number } {
+export function checkLookalikeDomain(domain: string): { isLookalike: boolean; brand?: string; similarityScore?: number } {
   const clean = domain.toLowerCase().replace(/^(www\.|mail\.|smtp\.)/, '');
+  const normalized = clean
+    .replace(/0/g, 'o')
+    .replace(/1/g, 'l')
+    .replace(/3/g, 'e')
+    .replace(/5/g, 's')
+    .replace(/8/g, 'b')
+    .replace(/vv/g, 'w');
+
   for (const brand of TARGET_BRANDS) {
     if (clean === brand) return { isLookalike: false }; // Exact match
+    const brandName = brand.split('.')[0];
     const dist = levenshteinDistance(clean, brand);
-    if (dist <= 2 || (clean.includes(brand.split('.')[0]) && clean !== brand)) {
-      return { isLookalike: true, brand, similarityScore: Math.round((1 - dist / Math.max(clean.length, brand.length)) * 100) };
+    const normDist = levenshteinDistance(normalized, brand);
+
+    if (
+      dist <= 2 ||
+      normDist <= 2 ||
+      (normalized.includes(brandName) && clean !== brand) ||
+      (clean.includes(brandName) && clean !== brand)
+    ) {
+      const bestDist = Math.min(dist, normDist);
+      return {
+        isLookalike: true,
+        brand,
+        similarityScore: Math.max(60, Math.round((1 - bestDist / Math.max(clean.length, brand.length)) * 100)),
+      };
     }
   }
   return { isLookalike: false };
+}
+
+export function detectPromptInjection(text: string): { detected: boolean; reason?: string; severity: SeverityLevel } {
+  const lower = text.toLowerCase();
+  const injectionPatterns = [
+    { regex: /ignore\s+(all\s+)?(previous|prior|above)\s+instructions/i, reason: 'Attempt to override AI system prompt instructions' },
+    { regex: /disregard\s+(all\s+)?(previous|prior|above)\s+(instructions|directives|rules)/i, reason: 'Attempt to disregard safety directives' },
+    { regex: /you\s+are\s+now\s+(in\s+developer\s+mode|dan|an\s+unfiltered|jailbroken)/i, reason: 'Jailbreak / role-reversal prompt injection trigger' },
+    { regex: /\[system\s+instruction\]|<\s*system\s*>|role:\s*system/i, reason: 'Fake system message token delimiter injection' },
+    { regex: /reveal\s+(your\s+)?(system\s+prompt|hidden\s+instructions|secret\s+key)/i, reason: 'Attempt to extract model configuration or confidential instructions' },
+    { regex: /repeat\s+(everything|the\s+text)\s+above/i, reason: 'Prompt extraction attack pattern' },
+    { regex: /assistant:\s*|system:\s*|human:\s*/i, reason: 'Conversation delimiter spoofing' },
+  ];
+
+  for (const p of injectionPatterns) {
+    if (p.regex.test(lower)) {
+      return { detected: true, reason: p.reason, severity: 'critical' };
+    }
+  }
+
+  return { detected: false, severity: 'low' };
+}
+
+export function detectHiddenContent(html: string, plainText: string): { detected: boolean; reasons: string[] } {
+  const reasons: string[] = [];
+
+  // Zero-width characters
+  const zeroWidthRegex = /[\u200B\u200C\u200D\uFEFF\u00AD]/;
+  if (zeroWidthRegex.test(plainText) || zeroWidthRegex.test(html)) {
+    reasons.push('Zero-width Unicode characters detected (obfuscation technique)');
+  }
+
+  // Hidden CSS styles
+  if (html) {
+    if (/display\s*:\s*none/i.test(html)) {
+      reasons.push('Hidden elements with "display: none" detected in HTML');
+    }
+    if (/visibility\s*:\s*hidden/i.test(html)) {
+      reasons.push('Hidden elements with "visibility: hidden" detected in HTML');
+    }
+    if (/font-size\s*:\s*0(?:px|pt|em|rem)?/i.test(html)) {
+      reasons.push('Micro-sized / invisible font size (0px) detected in HTML');
+    }
+    if (/opacity\s*:\s*0(?:\.0+)?/i.test(html)) {
+      reasons.push('Invisible text with zero opacity detected in HTML');
+    }
+    if (/<!--[\s\S]*?(?:instruction|system|ignore|bypass)[\s\S]*?-->/i.test(html)) {
+      reasons.push('Suspicious instructions embedded inside HTML comments');
+    }
+  }
+
+  return {
+    detected: reasons.length > 0,
+    reasons,
+  };
 }
 
 export interface FullThreatAnalysisResult {
@@ -86,10 +163,10 @@ export interface FullThreatAnalysisResult {
   };
 }
 
-export async function analyzeThreats(
+export function analyzeThreatDeterministic(
   parsed: ParsedRawEmail,
   relayResult: RelayAnalysisResult
-): Promise<FullThreatAnalysisResult> {
+): FullThreatAnalysisResult {
   const evidenceList: ThreatEvidenceItem[] = [];
   const indicators: IndicatorItem[] = [];
   const mitreAttack: Array<{
@@ -107,7 +184,6 @@ export async function analyzeThreats(
   const dkimHeader = parsed.headers['dkim-signature'];
   const senderDomain = parsed.from_email.includes('@') ? parsed.from_email.split('@')[1] : '';
 
-  // SPF check
   let spfResult: 'pass' | 'fail' | 'softfail' | 'neutral' | 'none' | 'temperror' | 'permerror' = 'none';
   let spfAligned = false;
   if (/spf=pass/i.test(authResultsHeader) || /Received-SPF:\s*pass/i.test(parsed.headers['received-spf'] || '')) {
@@ -121,7 +197,6 @@ export async function analyzeThreats(
     spfResult = 'neutral';
   }
 
-  // DKIM check
   let dkimResult: 'pass' | 'fail' | 'neutral' | 'none' | 'temperror' | 'permerror' = dkimHeader ? 'neutral' : 'none';
   let dkimAligned = false;
   let signingDomain = '';
@@ -141,12 +216,12 @@ export async function analyzeThreats(
     }
   }
 
-  // DMARC check
   let dmarcResult: 'pass' | 'fail' | 'none' | 'temperror' | 'permerror' = 'none';
   let dmarcPolicy: 'none' | 'quarantine' | 'reject' = 'none';
+
   if (/dmarc=pass/i.test(authResultsHeader)) {
     dmarcResult = 'pass';
-  } else if (/dmarc=fail/i.test(authResultsHeader)) {
+  } else if (/dmarc=fail/i.test(authResultsHeader) || (!spfAligned && !dkimAligned && (spfResult === 'fail' || dkimResult === 'fail'))) {
     dmarcResult = 'fail';
   }
 
@@ -195,7 +270,6 @@ export async function analyzeThreats(
     },
   };
 
-  // Evaluate Auth Evidences
   if (dmarcResult === 'fail') {
     rawRiskScore += 25;
     evidenceList.push({
@@ -311,6 +385,7 @@ export async function analyzeThreats(
   for (const url of parsed.extracted_urls) {
     const isIpUrl = /https?:\/\/\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/i.test(url);
     const isObfuscated = url.includes('@') || url.includes('%25') || url.includes('base64') || url.includes('.xyz') || url.includes('.top') || url.includes('.ru') || url.includes('.tk');
+    const isPunycode = url.includes('xn--');
 
     if (isIpUrl) {
       rawRiskScore += 20;
@@ -322,6 +397,20 @@ export async function analyzeThreats(
         description: `Hyperlink targets an unmapped IP address directly instead of a legitimate domain (${url}).`,
         severity: 'high',
         weight: 20,
+        mitre_technique: 'T1566.002 - Spearphishing Link',
+      });
+    }
+
+    if (isPunycode) {
+      rawRiskScore += 22;
+      evidenceList.push({
+        id: `ev-url-punycode-${url.slice(0, 20)}`,
+        rule_id: 'RULE_PUNYCODE_URL',
+        category: 'URL',
+        title: 'Internationalized Punycode Domain (Homoglyph Attack)',
+        description: `URL utilizes Punycode ('xn--') representation to conceal lookalike domain spoofing.`,
+        severity: 'critical',
+        weight: 22,
         mitre_technique: 'T1566.002 - Spearphishing Link',
       });
     }
@@ -391,7 +480,38 @@ export async function analyzeThreats(
     });
   }
 
-  // 8. Content & NLP Semantic Analysis
+  // 8. Prompt Injection & Hidden Content Forensics
+  const promptInjection = detectPromptInjection(`${parsed.subject} ${parsed.body_plain} ${parsed.body_html}`);
+  if (promptInjection.detected) {
+    rawRiskScore += 30;
+    evidenceList.push({
+      id: 'ev-prompt-injection',
+      rule_id: 'RULE_PROMPT_INJECTION_DETECTED',
+      category: 'CONTENT',
+      title: 'AI Prompt-Injection / Jailbreak Pattern Detected',
+      description: promptInjection.reason || 'Content contains adversarial instructions aimed at manipulating AI analysis models.',
+      severity: 'critical',
+      weight: 30,
+      mitre_technique: 'T1059 - Command and Scripting Interpreter',
+    });
+  }
+
+  const hiddenContent = detectHiddenContent(parsed.body_html, parsed.body_plain);
+  if (hiddenContent.detected) {
+    rawRiskScore += 20;
+    evidenceList.push({
+      id: 'ev-hidden-content',
+      rule_id: 'RULE_HIDDEN_OBFUSCATED_HTML',
+      category: 'CONTENT',
+      title: 'Hidden Obfuscated Text / Zero-Width Unicode',
+      description: hiddenContent.reasons.join('; '),
+      severity: 'high',
+      weight: 20,
+      mitre_technique: 'T1027 - Obfuscated Files or Information',
+    });
+  }
+
+  // 9. Content & NLP Semantic Analysis
   const fullText = `${parsed.subject} ${parsed.body_plain}`.toLowerCase();
 
   const urgencyWords = ['urgent', 'immediate', 'asap', 'within 24 hours', 'action required', 'account suspended', 'terminated', 'deadline', 'critical notice', 'final warning'];
@@ -494,7 +614,6 @@ export async function analyzeThreats(
     classification = 'LEGITIMATE';
   }
 
-  // Calculate confidence score (0.7 - 0.98)
   const confidence = Math.min(0.98, 0.70 + (evidenceList.length * 0.04));
 
   // Build Indicator items
@@ -568,7 +687,6 @@ export async function analyzeThreats(
     });
   }
 
-  // Generate Defensive Recommendations
   if (classification === 'BUSINESS_EMAIL_COMPROMISE' || classification === 'FRAUD') {
     defensiveRecommendations.push('Freeze any pending wire transactions and verify payment directives via out-of-band phone call.');
     defensiveRecommendations.push('Block sender domain across enterprise email security gateways (SEG).');
@@ -585,7 +703,6 @@ export async function analyzeThreats(
     defensiveRecommendations.push('Maintain standard monitoring; message exhibits standard legitimate routing authentication.');
   }
 
-  // Executive summary
   const executive_summary = `Forensic analysis classified this message as ${classification} (Risk Score: ${risk_score}/100, Confidence: ${Math.round(confidence * 100)}%). ${
     evidenceList.length > 0
       ? `Primary risk factors include ${evidenceList.slice(0, 3).map((e) => e.title.toLowerCase()).join(', ')}.`
@@ -608,38 +725,9 @@ export async function analyzeThreats(
     ai_summary: executive_summary,
   };
 
-  // AI-Assisted Reasoning via Gemini API (if GEMINI_API_KEY is available)
-  let ai_reasoning = '';
-  if (process.env.GEMINI_API_KEY) {
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-      const prompt = `You are a Tier-3 Cybersecurity Forensic Email Analyst. Provide a brief 3-sentence technical forensic evaluation for this analyzed email:
-Subject: "${parsed.subject}"
-From: "${parsed.from}" (Email: "${parsed.from_email}")
-Reply-To: "${parsed.reply_to || 'None'}"
-SPF: ${authAnalysis.spf.result}, DKIM: ${authAnalysis.dkim.result}, DMARC: ${authAnalysis.dmarc.result}
-Calculated Risk: ${risk_score}/100 (${classification})
-Origin Node: ${originNode?.ip_address} (${originNode?.infrastructure_info})
-Identified Evidence: ${evidenceList.map((e) => e.title).join(', ')}
-Body excerpt: "${parsed.body_plain.slice(0, 300)}"
-
-Explain technical deception tactics, relay infrastructure reliability, and impact. Do NOT claim the IP proves physical human sender identity.`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-      });
-      ai_reasoning = response.text || '';
-    } catch (err: any) {
-      console.warn('Gemini API query skipped/failed, using deterministic reasoning:', err?.message);
-    }
-  }
-
-  if (!ai_reasoning) {
-    ai_reasoning = `Deterministic forensic evaluation identified ${evidenceList.length} distinct threat indicators. The message demonstrates ${
-      risk_score > 60 ? 'active deceptive intent utilizing infrastructure masking and authentication bypass' : 'normal standard business correspondence'
-    }. Relay node tracing established origin injection at ${originNode ? originNode.ip_address : 'remote MTA'} with ${originNode?.reliability_score || 70}% candidate reliability.`;
-  }
+  const ai_reasoning = `Deterministic forensic evaluation identified ${evidenceList.length} distinct threat indicators. The message demonstrates ${
+    risk_score > 60 ? 'active deceptive intent utilizing infrastructure masking and authentication bypass' : 'normal standard business correspondence'
+  }. Relay node tracing established origin injection at ${originNode ? originNode.ip_address : 'remote MTA'} with ${originNode?.reliability_score || 70}% candidate reliability.`;
 
   return {
     risk_score,
@@ -662,4 +750,65 @@ Explain technical deception tactics, relay infrastructure reliability, and impac
         'This forensic report was cryptographically signed and produced for authorized defensive cybersecurity and incident response purposes under RFC 5322 specifications.',
     },
   };
+}
+
+export async function analyzeThreats(
+  parsed: ParsedRawEmail,
+  relayResult: RelayAnalysisResult
+): Promise<FullThreatAnalysisResult> {
+  const result = analyzeThreatDeterministic(parsed, relayResult);
+
+  // 1. External Threat Intelligence Enrichment
+  try {
+    for (const att of parsed.attachments) {
+      if (att.sha256) {
+        const vtRes = await intelligenceManager.enrichHash(att.sha256);
+        if (vtRes.status === 'LIVE' && vtRes.reputation === 'MALICIOUS') {
+          result.risk_score = Math.min(100, result.risk_score + 35);
+          result.evidence_list.push({
+            id: `ev-vt-hash-${att.sha256.slice(0, 12)}`,
+            rule_id: 'RULE_VT_KNOWN_MALICIOUS_HASH',
+            category: 'ATTACHMENT',
+            title: `VirusTotal Malicious Hash Detection (${att.filename})`,
+            description: `VirusTotal returned ${vtRes.data?.malicious || 'multiple'} vendor detections for SHA-256 ${att.sha256.slice(0, 16)}...`,
+            severity: 'critical',
+            weight: 35,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[ThreatEngine] External intelligence enrichment skipped/error:', err);
+  }
+
+  // 2. Gemini Reasoning (if key available)
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      const originNode = relayResult.origin_candidates[0];
+      const prompt = `You are a Tier-3 Cybersecurity Forensic Email Analyst. Provide a brief 3-sentence technical forensic evaluation for this analyzed email:
+Subject: "${parsed.subject}"
+From: "${parsed.from}" (Email: "${parsed.from_email}")
+Reply-To: "${parsed.reply_to || 'None'}"
+SPF: ${result.auth_analysis.spf.result}, DKIM: ${result.auth_analysis.dkim.result}, DMARC: ${result.auth_analysis.dmarc.result}
+Calculated Risk: ${result.risk_score}/100 (${result.classification})
+Origin Node: ${originNode?.ip_address} (${originNode?.infrastructure_info})
+Identified Evidence: ${result.evidence_list.map((e) => e.title).join(', ')}
+Body excerpt: "${parsed.body_plain.slice(0, 300)}"
+
+Explain technical deception tactics, relay infrastructure reliability, and impact. Do NOT claim the IP proves physical human sender identity.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+      });
+      if (response.text) {
+        result.ai_reasoning = response.text;
+      }
+    } catch (err: any) {
+      console.warn('Gemini API query skipped/failed, using deterministic reasoning:', err?.message);
+    }
+  }
+
+  return result;
 }
